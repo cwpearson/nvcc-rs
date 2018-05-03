@@ -52,7 +52,7 @@ impl From<io::Error> for Error {
     }
 }
 
-struct Build {
+pub struct Build {
     cargo_metadata: bool,
     compiler: Option<PathBuf>,
     files: Vec<PathBuf>,
