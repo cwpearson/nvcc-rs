@@ -361,6 +361,12 @@ impl Build {
         self.print("cargo:rustc-link-lib=cudart");
         self.print("cargo:rustc-link-lib=cudadevrt");
 
+
+        // rerun if files changes
+        for file in self.files.clone() {
+            self.print(&format!("cargo:rerun-if-changed={}", file.to_str().unwrap()));
+        }
+
         Ok(())
     }
 
