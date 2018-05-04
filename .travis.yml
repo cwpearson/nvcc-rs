@@ -15,8 +15,8 @@ notifications:
 branches:
   only:
     - master
+
 addons:
   apt:
     packages:
-      - ca-certificates
       - clang
