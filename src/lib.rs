@@ -7,7 +7,9 @@ mod tests {
 }
 
 extern crate glob;
+extern crate regex;
 
+use regex::Regex;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -56,7 +58,7 @@ impl From<io::Error> for Error {
 }
 
 /// Backup search directory globs for FreeBSD and Linux.
-const SEARCH_LINUX: &[&str] = &["/usr/local/cuda*"];
+const SEARCH_LINUX: &[&str] = &["/usr/local/cuda/bin", "/usr/local/cuda*/bin"];
 
 /// Backup search directory globs for OS X.
 const SEARCH_OSX: &[&str] = &[];
@@ -115,7 +117,7 @@ fn contains(directory: &Path, files: &[String]) -> Option<PathBuf> {
 fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
     /// Searches the supplied directory and, on Windows, any relevant sibling directories.
     macro_rules! search_directory {
-        ($directory:ident) => {
+        ($directory: ident) => {
             if let Some(file) = contains(&$directory, files) {
                 return Ok(file);
             }
@@ -124,13 +126,13 @@ fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
             // `libclang.lib` is usually found in the LLVM `lib` directory. To keep things
             // consistent with other platforms, only LLVM `lib` directories are included in the
             // backup search directory globs so we need to search the LLVM `bin` directory here.
-            if cfg!(target_os="windows") && $directory.ends_with("lib") {
+            if cfg!(target_os = "windows") && $directory.ends_with("lib") {
                 let sibling = $directory.parent().unwrap().join("bin");
                 if let Some(file) = contains(&sibling, files) {
                     return Ok(file);
                 }
             }
-        }
+        };
     }
 
     // Search the directory provided by the relevant environment variable if it is set.
@@ -156,11 +158,13 @@ fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
         &[]
     };
     for pattern in search {
+        eprintln!("Searching for {}", pattern);
         let mut options = MatchOptions::new();
         options.case_sensitive = false;
         options.require_literal_separator = true;
         if let Ok(paths) = glob::glob_with(pattern, &options) {
             for path in paths.filter_map(Result::ok).filter(|p| p.is_dir()) {
+                eprintln!("Looking in {:?}", path);
                 search_directory!(path);
             }
         }
@@ -192,7 +196,6 @@ pub struct Build {
     //     files: Vec<PathBuf>,
     //     cpp: bool,
     link_cpp_stdlib: Option<Option<String>>,
-    //     cuda: bool,
     static_flag: bool,
     target: Option<String>,
     //     opt_level: Option<String>,
@@ -325,6 +328,33 @@ impl Build {
         }
     }
 
+    fn get_nvcc(&self) -> Result<PathBuf, Error> {
+        match find(&["nvcc".to_owned()], "CUDA_HOST") {
+            Ok(path) => return Ok(path),
+            Err(s) => return Err(Error::new(ErrorKind::ToolNotFound, s.as_str())),
+        };
+    }
+
+    /// use nvcc -v to get includes
+    fn try_get_nvcc_includes(&self) -> Result<Vec<PathBuf>, Error> {
+        let nvcc = self.get_nvcc()?;
+
+        let out = Command::new(nvcc).arg("-v").arg(".").output()?;
+        let re = Regex::new(r#""([.[^"]]*)""#).unwrap();
+
+        for line in out.stderr.lines().filter(|l| l.is_ok() ).map(|l| l.unwrap()) {
+                if line.starts_with("#$ INCLUDES=") {
+                    eprintln!("{:?}", line);
+                    let matches: Vec<_> = re.captures_iter(line.as_str()).map(|c| c.get(1).unwrap().as_str()).collect();
+                    let paths: Vec<_> = matches.iter().map(|m| PathBuf::from(m)).collect();
+                    println!("{:?}", paths);
+                    return Ok(paths);
+                }
+        };
+
+        Err(Error::new(ErrorKind::ToolNotFound, "coulnd't find nvcc include dirs"))
+    }
+
     fn get_ar(&self) -> Result<String, Error> {
         let host = self.get_host()?;
         let target = self.get_target()?;
@@ -348,7 +378,9 @@ impl Build {
 
     fn try_compile_object(&self, obj: &PathBuf, src: &PathBuf) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
-        let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
+        // let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
+        let nvcc = self.get_nvcc()?;
+        let incs = self.try_get_nvcc_includes()?;
 
         let out = Command::new("nvcc")
             .args(&self.flags)
@@ -359,7 +391,8 @@ impl Build {
             .arg("-Xcompiler")
             .arg("-fPIC")
             .arg("-Xcompiler")
-            .arg(String::from("-I") + &cuda_root + "/include")
+            .args(incs)
+            // .arg(String::from("-I") + &cuda_root + "/include")
             .arg("-o")
             .arg(obj)
             .arg(src)
@@ -383,7 +416,8 @@ impl Build {
 
     fn try_device_link(&self, output: &PathBuf, objects: &Vec<PathBuf>) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
-        let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
+        // let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
+        let incs = self.try_get_nvcc_includes()?;
 
         let out = Command::new("nvcc")
             .args(&self.flags)
@@ -393,7 +427,8 @@ impl Build {
             .arg("-Xcompiler")
             .arg("-fPIC")
             .arg("-Xcompiler")
-            .arg(String::from("-I") + &cuda_root + "/include")
+            .args(incs)
+            // .arg(String::from("-I") + &cuda_root + "/include")
             .arg("-o")
             .arg(output)
             .args(objects)
