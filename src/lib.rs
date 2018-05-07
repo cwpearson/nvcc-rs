@@ -6,12 +6,15 @@ mod tests {
     }
 }
 
+extern crate glob;
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 use std::path::Path;
 use std::vec::Vec;
 use std::string::String;
+use glob::{MatchOptions};
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
@@ -50,6 +53,126 @@ impl From<io::Error> for Error {
     fn from(e: io::Error) -> Error {
         Error::new(ErrorKind::IOError, &format!("{}", e))
     }
+}
+
+/// Backup search directory globs for FreeBSD and Linux.
+const SEARCH_LINUX: &[&str] = &[
+    "/usr/local/cuda*",
+];
+
+/// Backup search directory globs for OS X.
+const SEARCH_OSX: &[&str] = &[
+
+];
+
+/// Backup search directory globs for Windows.
+const SEARCH_WINDOWS: &[&str] = &[
+
+];
+
+/// Returns the version in the supplied file if one can be found.
+fn find_version(file: &str) -> Option<&str> {
+    if file.starts_with("libclang.so.") {
+        Some(&file[12..])
+    } else if file.starts_with("libclang-") {
+        Some(&file[9..])
+    } else {
+        None
+    }
+}
+
+/// Returns the components of the version appended to the supplied file.
+fn parse_version(file: &Path) -> Vec<u32> {
+    let file = file.file_name().and_then(|f| f.to_str()).unwrap_or("");
+    let version = find_version(file).unwrap_or("");
+    version.split('.').map(|s| s.parse::<u32>().unwrap_or(0)).collect()
+}
+
+/// Returns a path to one of the supplied files if such a file can be found in the supplied directory.
+fn contains(directory: &Path, files: &[String]) -> Option<PathBuf> {
+    // Join the directory to the files to obtain our glob patterns.
+    let patterns = files.iter().filter_map(|f| directory.join(f).to_str().map(ToOwned::to_owned));
+
+    // Prevent wildcards from matching path separators.
+    let mut options = MatchOptions::new();
+    options.require_literal_separator = true;
+
+    // Collect any files that match the glob patterns.
+    let mut matches = patterns.flat_map(|p| {
+        if let Ok(paths) = glob::glob_with(&p, &options) {
+            paths.filter_map(Result::ok).collect()
+        } else {
+            vec![]
+        }
+    }).collect::<Vec<_>>();
+
+    // Sort the matches by their version, preferring shorter and higher versions.
+    matches.sort_by_key(|m| parse_version(m));
+    matches.pop()
+}
+
+fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
+
+    /// Searches the supplied directory and, on Windows, any relevant sibling directories.
+    macro_rules! search_directory {
+        ($directory:ident) => {
+            if let Some(file) = contains(&$directory, files) {
+                return Ok(file);
+            }
+
+            // On Windows, `libclang.dll` is usually found in the LLVM `bin` directory while
+            // `libclang.lib` is usually found in the LLVM `lib` directory. To keep things
+            // consistent with other platforms, only LLVM `lib` directories are included in the
+            // backup search directory globs so we need to search the LLVM `bin` directory here.
+            if cfg!(target_os="windows") && $directory.ends_with("lib") {
+                let sibling = $directory.parent().unwrap().join("bin");
+                if let Some(file) = contains(&sibling, files) {
+                    return Ok(file);
+                }
+            }
+        }
+    }
+
+    // Search the directory provided by the relevant environment variable if it is set.
+    if let Ok(directory) = env::var(env).map(|d| Path::new(&d).to_path_buf()) {
+        search_directory!(directory);
+    }
+
+    // Search the `LD_LIBRARY_PATH` directories.
+    if let Ok(path) = env::var("LD_LIBRARY_PATH") {
+        for directory in path.split(":").map(Path::new) {
+            search_directory!(directory);
+        }
+    }
+
+    // Search the backup directories.
+    let search = if cfg!(any(target_os="freebsd", target_os="linux")) {
+        SEARCH_LINUX
+    } else if cfg!(target_os="macos") {
+        SEARCH_OSX
+    } else if cfg!(target_os="windows") {
+        SEARCH_WINDOWS
+    } else {
+        &[]
+    };
+    for pattern in search {
+        let mut options = MatchOptions::new();
+        options.case_sensitive = false;
+        options.require_literal_separator = true;
+        if let Ok(paths) = glob::glob_with(pattern, &options) {
+            for path in paths.filter_map(Result::ok).filter(|p| p.is_dir()) {
+                search_directory!(path);
+            }
+        }
+    }
+
+    let message = format!(
+        "couldn't find any of [{}], set the {} environment variable to a path where one of these \
+         files can be found",
+        files.iter().map(|f| format!("'{}'", f)).collect::<Vec<_>>().join(", "),
+        env,
+    );
+    Err(message)
 }
 
 pub struct Build {
