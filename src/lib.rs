@@ -14,7 +14,7 @@ use std::process::Command;
 use std::path::Path;
 use std::vec::Vec;
 use std::string::String;
-use glob::{MatchOptions};
+use glob::MatchOptions;
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
@@ -56,19 +56,13 @@ impl From<io::Error> for Error {
 }
 
 /// Backup search directory globs for FreeBSD and Linux.
-const SEARCH_LINUX: &[&str] = &[
-    "/usr/local/cuda*",
-];
+const SEARCH_LINUX: &[&str] = &["/usr/local/cuda*"];
 
 /// Backup search directory globs for OS X.
-const SEARCH_OSX: &[&str] = &[
-
-];
+const SEARCH_OSX: &[&str] = &[];
 
 /// Backup search directory globs for Windows.
-const SEARCH_WINDOWS: &[&str] = &[
-
-];
+const SEARCH_WINDOWS: &[&str] = &[];
 
 /// Returns the version in the supplied file if one can be found.
 fn find_version(file: &str) -> Option<&str> {
@@ -85,26 +79,33 @@ fn find_version(file: &str) -> Option<&str> {
 fn parse_version(file: &Path) -> Vec<u32> {
     let file = file.file_name().and_then(|f| f.to_str()).unwrap_or("");
     let version = find_version(file).unwrap_or("");
-    version.split('.').map(|s| s.parse::<u32>().unwrap_or(0)).collect()
+    version
+        .split('.')
+        .map(|s| s.parse::<u32>().unwrap_or(0))
+        .collect()
 }
 
 /// Returns a path to one of the supplied files if such a file can be found in the supplied directory.
 fn contains(directory: &Path, files: &[String]) -> Option<PathBuf> {
     // Join the directory to the files to obtain our glob patterns.
-    let patterns = files.iter().filter_map(|f| directory.join(f).to_str().map(ToOwned::to_owned));
+    let patterns = files
+        .iter()
+        .filter_map(|f| directory.join(f).to_str().map(ToOwned::to_owned));
 
     // Prevent wildcards from matching path separators.
     let mut options = MatchOptions::new();
     options.require_literal_separator = true;
 
     // Collect any files that match the glob patterns.
-    let mut matches = patterns.flat_map(|p| {
-        if let Ok(paths) = glob::glob_with(&p, &options) {
-            paths.filter_map(Result::ok).collect()
-        } else {
-            vec![]
-        }
-    }).collect::<Vec<_>>();
+    let mut matches = patterns
+        .flat_map(|p| {
+            if let Ok(paths) = glob::glob_with(&p, &options) {
+                paths.filter_map(Result::ok).collect()
+            } else {
+                vec![]
+            }
+        })
+        .collect::<Vec<_>>();
 
     // Sort the matches by their version, preferring shorter and higher versions.
     matches.sort_by_key(|m| parse_version(m));
@@ -112,7 +113,6 @@ fn contains(directory: &Path, files: &[String]) -> Option<PathBuf> {
 }
 
 fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
-
     /// Searches the supplied directory and, on Windows, any relevant sibling directories.
     macro_rules! search_directory {
         ($directory:ident) => {
@@ -146,11 +146,11 @@ fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
     }
 
     // Search the backup directories.
-    let search = if cfg!(any(target_os="freebsd", target_os="linux")) {
+    let search = if cfg!(any(target_os = "freebsd", target_os = "linux")) {
         SEARCH_LINUX
-    } else if cfg!(target_os="macos") {
+    } else if cfg!(target_os = "macos") {
         SEARCH_OSX
-    } else if cfg!(target_os="windows") {
+    } else if cfg!(target_os = "windows") {
         SEARCH_WINDOWS
     } else {
         &[]
@@ -166,7 +166,8 @@ fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
         }
     }
 
-    let message = format!(
+    let message =
+        format!(
         "couldn't find any of [{}], set the {} environment variable to a path where one of these \
          files can be found",
         files.iter().map(|f| format!("'{}'", f)).collect::<Vec<_>>().join(", "),
@@ -350,6 +351,7 @@ impl Build {
         let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
 
         let out = Command::new("nvcc")
+            .args(&self.flags)
             .arg("-ccbin")
             .arg(compiler)
             .arg("-rdc=true")
@@ -384,6 +386,7 @@ impl Build {
         let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
 
         let out = Command::new("nvcc")
+            .args(&self.flags)
             .arg("-ccbin")
             .arg(compiler)
             .arg("-dlink")
