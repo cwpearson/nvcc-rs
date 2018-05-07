@@ -67,8 +67,7 @@ pub struct Build {
     //     known_flag_support_status: Arc<Mutex<HashMap<String, bool>>>,
     //     files: Vec<PathBuf>,
     //     cpp: bool,
-    //     cpp_link_stdlib: Option<Option<String>>,
-    //     cpp_set_stdlib: Option<String>,
+    link_cpp_stdlib: Option<Option<String>>,
     //     cuda: bool,
     static_flag: bool,
     target: Option<String>,
@@ -92,6 +91,7 @@ impl Build {
             host: None,
             out_dir: None,
             target: None,
+            link_cpp_stdlib: None,
             static_flag: true,
         }
     }
@@ -109,6 +109,16 @@ impl Build {
         for file in p.into_iter() {
             self.file(file);
         }
+        self
+    }
+
+    pub fn link_cpp_stdlib(&mut self) -> &mut Build {
+        self.link_cpp_stdlib = Some(None);
+        self
+    }
+
+    pub fn set_cpp_stdlib(&mut self, s: &str) -> &mut Build {
+        self.link_cpp_stdlib = Some(Some(s.to_owned()));
         self
     }
 
@@ -365,6 +375,14 @@ impl Build {
         // rerun if files changes
         for file in self.files.clone() {
             self.print(&format!("cargo:rerun-if-changed={}", file.to_str().unwrap()));
+        }
+
+        if let Some(ref lib) = self.link_cpp_stdlib {
+            let lib = match lib {
+                &Some(ref lib) => lib.as_str(),
+                &None => "stdc++",
+            };
+            self.print(&format!("cargo:rustc-link-lib={}", lib));
         }
 
         Ok(())
