@@ -62,7 +62,7 @@ pub struct Build {
     //     include_directories: Vec<PathBuf>,
     //     definitions: Vec<(String, Option<String>)>,
     //     objects: Vec<PathBuf>,
-    //     flags: Vec<String>,
+    flags: Vec<String>,
     //     flags_supported: Vec<String>,
     //     known_flag_support_status: Arc<Mutex<HashMap<String, bool>>>,
     //     files: Vec<PathBuf>,
@@ -88,6 +88,7 @@ impl Build {
             cargo_metadata: true,
             compiler: None,
             files: vec![],
+            flags: vec![],
             host: None,
             out_dir: None,
             target: None,
@@ -119,6 +120,11 @@ impl Build {
 
     pub fn set_cpp_stdlib(&mut self, s: &str) -> &mut Build {
         self.link_cpp_stdlib = Some(Some(s.to_owned()));
+        self
+    }
+
+    pub fn flag<P: ToString>(&mut self, p: P) -> &mut Build {
+        self.flags.push(p.to_string());
         self
     }
 
@@ -371,10 +377,12 @@ impl Build {
         self.print("cargo:rustc-link-lib=cudart");
         self.print("cargo:rustc-link-lib=cudadevrt");
 
-
         // rerun if files changes
         for file in self.files.clone() {
-            self.print(&format!("cargo:rerun-if-changed={}", file.to_str().unwrap()));
+            self.print(&format!(
+                "cargo:rerun-if-changed={}",
+                file.to_str().unwrap()
+            ));
         }
 
         if let Some(ref lib) = self.link_cpp_stdlib {
@@ -398,5 +406,3 @@ impl Build {
 fn fail(s: &str) -> ! {
     panic!("\n\nInternal error occurred: {}\n\n", s)
 }
-
-
