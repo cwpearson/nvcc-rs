@@ -140,8 +140,8 @@ fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
         search_directory!(directory);
     }
 
-    // Search the `LD_LIBRARY_PATH` directories.
-    if let Ok(path) = env::var("LD_LIBRARY_PATH") {
+    // Search the `PATH` directories.
+    if let Ok(path) = env::var("PATH") {
         for directory in path.split(":").map(Path::new) {
             search_directory!(directory);
         }
