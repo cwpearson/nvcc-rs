@@ -329,7 +329,7 @@ impl Build {
     }
 
     fn get_nvcc(&self) -> Result<PathBuf, Error> {
-        match find(&["nvcc".to_owned()], "CUDA_HOST") {
+        match find(&["nvcc".to_owned()], "NVCC_PATH") {
             Ok(path) => return Ok(path),
             Err(s) => return Err(Error::new(ErrorKind::ToolNotFound, s.as_str())),
         };
@@ -459,7 +459,6 @@ impl Build {
 
     fn try_device_link(&self, output: &PathBuf, objects: &Vec<PathBuf>) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
-        // let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
         let incs = self.try_get_nvcc_includes()?;
 
         let out = Command::new("nvcc")
