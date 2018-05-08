@@ -18,7 +18,7 @@ use std::vec::Vec;
 use std::string::String;
 use glob::MatchOptions;
 
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead};
 
 #[derive(Clone, Debug)]
 enum ErrorKind {
@@ -338,21 +338,66 @@ impl Build {
     /// use nvcc -v to get includes
     fn try_get_nvcc_includes(&self) -> Result<Vec<PathBuf>, Error> {
         let nvcc = self.get_nvcc()?;
-
         let out = Command::new(nvcc).arg("-v").arg(".").output()?;
         let re = Regex::new(r#""([.[^"]]*)""#).unwrap();
 
-        for line in out.stderr.lines().filter(|l| l.is_ok() ).map(|l| l.unwrap()) {
-                if line.starts_with("#$ INCLUDES=") {
-                    eprintln!("{:?}", line);
-                    let matches: Vec<_> = re.captures_iter(line.as_str()).map(|c| c.get(1).unwrap().as_str()).collect();
-                    let paths: Vec<_> = matches.iter().map(|m| PathBuf::from(m)).collect();
-                    println!("{:?}", paths);
-                    return Ok(paths);
-                }
-        };
+        let include_lines = out.stderr.lines()
+            .filter_map(|l| if let Ok(l) = l { Some(l) } else { None } )
+            .filter(|l| l.starts_with("#$ INCLUDES="))
+            .collect::<Vec<_>>();
 
-        Err(Error::new(ErrorKind::ToolNotFound, "coulnd't find nvcc include dirs"))
+        eprintln!("INCLUDES lines from nvcc -v: {:?}", include_lines);
+
+        if include_lines.len() == 0 {
+            return Err(Error::new(
+                ErrorKind::ToolNotFound,
+                "didn't find INCLUDES in nvcc -v output",
+            ));
+        }
+
+        let mut matches = vec![];
+
+        for line in include_lines {
+            // eprintln!("{:?}", line);
+            matches.append(
+                &mut re.captures_iter(line.as_str())
+                    .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
+                    .collect::<Vec<_>>()
+            )
+        }
+        return Ok(matches);
+    }
+
+    /// use nvcc -v to get includes
+    fn try_get_nvcc_libraries(&self) -> Result<Vec<PathBuf>, Error> {
+        let nvcc = self.get_nvcc()?;
+        let out = Command::new(nvcc).arg("-v").arg(".").output()?;
+        let re = Regex::new(r#""-L([.[^"]]*)""#).unwrap();
+
+        let libraries_lines = out.stderr.lines()
+            .filter_map(|l| if let Ok(l) = l { Some(l) } else { None } )
+            .filter(|l| l.starts_with("#$ LIBRARIES="))
+            .collect::<Vec<_>>();
+
+        eprintln!("LIBRARIES lines from nvcc -v: {:?}", libraries_lines);
+
+        if libraries_lines.len() == 0 {
+            return Err(Error::new(
+                ErrorKind::ToolNotFound,
+                "didn't find INCLUDES in nvcc -v output",
+            ));
+        }
+
+        let mut matches = vec![];
+
+        for line in libraries_lines {
+            matches.append(
+                &mut re.captures_iter(line.as_str())
+                    .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
+                    .collect::<Vec<_>>()
+            )
+        }
+        return Ok(matches);
     }
 
     fn get_ar(&self) -> Result<String, Error> {
@@ -378,7 +423,6 @@ impl Build {
 
     fn try_compile_object(&self, obj: &PathBuf, src: &PathBuf) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
-        // let cuda_root = self.getenv_unwrap("CUDA_HOST")?;
         let nvcc = self.get_nvcc()?;
         let incs = self.try_get_nvcc_includes()?;
 
@@ -392,7 +436,6 @@ impl Build {
             .arg("-fPIC")
             .arg("-Xcompiler")
             .args(incs)
-            // .arg(String::from("-I") + &cuda_root + "/include")
             .arg("-o")
             .arg(obj)
             .arg(src)
@@ -427,8 +470,7 @@ impl Build {
             .arg("-Xcompiler")
             .arg("-fPIC")
             .arg("-Xcompiler")
-            .args(incs)
-            // .arg(String::from("-I") + &cuda_root + "/include")
+            .args(incs.iter().map(|i| String::from("-I") + i.to_str().unwrap()))
             .arg("-o")
             .arg(output)
             .args(objects)
@@ -516,6 +558,7 @@ impl Build {
         all_objs.append(&mut objects.clone());
         self.try_archive(&out_path, &all_objs)?;
 
+        // Link against generated library
         self.print(&format!(
             "cargo:rustc-link-search=native={}",
             out_dir.to_str().unwrap()
@@ -523,18 +566,24 @@ impl Build {
         self.print(&format!("cargo:rustc-link-lib=static={}", output));
 
         // Link against cuda libs
-        let cuda_lib_path = if host != target {
+        if host != target {
             let raw = self.getenv_unwrap("CUDA_TARGET")?;
-            PathBuf::from(raw).join("lib64")
+            let cuda_lib_path = PathBuf::from(raw).join("lib64");
+            self.print(&format!(
+                "cargo:rustc-link-search=native={}",
+                cuda_lib_path.to_str().unwrap()
+            ));
         } else {
-            let raw = self.getenv_unwrap("CUDA_HOST")?;
-            PathBuf::from(raw).join("lib64")
+            let paths = self.try_get_nvcc_libraries();
+            match paths {
+                Ok(paths) => for path in paths {
+                    self.print(&format!("cargo:rustc-link-search=native={}", path.to_str().unwrap()));
+                },
+                Err(e) => return Err(e),
+            }
         };
 
-        self.print(&format!(
-            "cargo:rustc-link-search=native={}",
-            cuda_lib_path.to_str().unwrap()
-        ));
+
         self.print("cargo:rustc-link-lib=cudart");
         self.print("cargo:rustc-link-lib=cudadevrt");
 
