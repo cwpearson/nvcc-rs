@@ -335,6 +335,7 @@ impl Build {
     fn get_nvcc(&self) -> Result<Nvcc, Error> {
         let nvcc_path = Find::new("nvcc")
             .search_env("NVCC_PATH")
+            .search_env("PATH")
             .search_globs(SEARCH_LINUX)
             .execute();
 
