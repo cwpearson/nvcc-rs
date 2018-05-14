@@ -1,11 +1,50 @@
 #[cfg(test)]
 mod tests {
+
+    use super::*;
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn nvcc_new() {
+        let lines = r#"
+#$ _SPACE_= 
+#$ _CUDART_=cudart
+#$ _HERE_=/usr/local/cuda/bin
+#$ _THERE_=/usr/local/cuda/bin
+#$ _TARGET_SIZE_=
+#$ _TARGET_DIR_=
+#$ _TARGET_SIZE_=64
+#$ TOP=/usr/local/cuda/bin/..
+#$ NVVMIR_LIBRARY_DIR=/usr/local/cuda/bin/../nvvm/libdevice
+#$ LD_LIBRARY_PATH=/usr/local/cuda/bin/../lib::/usr/local/cuda/lib64
+#$ PATH=/usr/local/cuda/bin/../nvvm/bin:/usr/local/cuda/bin:/home/pearson/software/robo3t-1.2.1-linux-x86_64-3e50a65/bin:/home/pearson/software/toolchains/llvm-trunk/bin:/home/pearson/bin:/home/pearson/.cargo/bin:/home/pearson/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/local/cuda/bin
+#$ INCLUDES="-I/usr/local/cuda/bin/..//include"  
+#$ LIBRARIES=  "-L/usr/local/cuda/bin/..//lib64/stubs" "-L/usr/local/cuda/bin/..//lib64"
+#$ CUDAFE_FLAGS=
+#$ PTXAS_FLAGS=
+"#.split("\n").map(|l| l.to_owned()).collect::<Vec<_>>();
+
+        let nvcc = Nvcc {
+            path: PathBuf::from("."),
+            includes: vec![],
+            libraries: vec![],
+        };
+        let (includes, libraries) = Nvcc::parse_verbose(&lines);
+
+        assert_eq!(
+            includes,
+            vec![PathBuf::from("/usr/local/cuda/bin/..//include")]
+        );
+        assert_eq!(
+            libraries,
+            vec![
+                PathBuf::from("/usr/local/cuda/bin/..//lib64/stubs"),
+                PathBuf::from("/usr/local/cuda/bin/..//lib64"),
+            ]
+        );
     }
 }
 
+extern crate find;
 extern crate glob;
 extern crate regex;
 
@@ -17,6 +56,7 @@ use std::path::Path;
 use std::vec::Vec;
 use std::string::String;
 use glob::MatchOptions;
+use find::Find;
 
 use std::io::{self, BufRead};
 
@@ -66,118 +106,82 @@ const SEARCH_OSX: &[&str] = &[];
 /// Backup search directory globs for Windows.
 const SEARCH_WINDOWS: &[&str] = &[];
 
-/// Returns the version in the supplied file if one can be found.
-fn find_version(file: &str) -> Option<&str> {
-    if file.starts_with("libclang.so.") {
-        Some(&file[12..])
-    } else if file.starts_with("libclang-") {
-        Some(&file[9..])
-    } else {
-        None
-    }
+#[derive(Debug, Clone)]
+pub struct Nvcc {
+    /// where nvcc is
+    path: PathBuf,
+    /// nvcc's include directories
+    includes: Vec<PathBuf>,
+    /// nvcc's library directories
+    libraries: Vec<PathBuf>,
 }
 
-/// Returns the components of the version appended to the supplied file.
-fn parse_version(file: &Path) -> Vec<u32> {
-    let file = file.file_name().and_then(|f| f.to_str()).unwrap_or("");
-    let version = find_version(file).unwrap_or("");
-    version
-        .split('.')
-        .map(|s| s.parse::<u32>().unwrap_or(0))
-        .collect()
-}
-
-/// Returns a path to one of the supplied files if such a file can be found in the supplied directory.
-fn contains(directory: &Path, files: &[String]) -> Option<PathBuf> {
-    // Join the directory to the files to obtain our glob patterns.
-    let patterns = files
-        .iter()
-        .filter_map(|f| directory.join(f).to_str().map(ToOwned::to_owned));
-
-    // Prevent wildcards from matching path separators.
-    let mut options = MatchOptions::new();
-    options.require_literal_separator = true;
-
-    // Collect any files that match the glob patterns.
-    let mut matches = patterns
-        .flat_map(|p| {
-            if let Ok(paths) = glob::glob_with(&p, &options) {
-                paths.filter_map(Result::ok).collect()
-            } else {
-                vec![]
-            }
-        })
-        .collect::<Vec<_>>();
-
-    // Sort the matches by their version, preferring shorter and higher versions.
-    matches.sort_by_key(|m| parse_version(m));
-    matches.pop()
-}
-
-fn find(files: &[String], env: &str) -> Result<PathBuf, String> {
-    /// Searches the supplied directory and, on Windows, any relevant sibling directories.
-    macro_rules! search_directory {
-        ($directory: ident) => {
-            if let Some(file) = contains(&$directory, files) {
-                return Ok(file);
-            }
-
-            // On Windows, `libclang.dll` is usually found in the LLVM `bin` directory while
-            // `libclang.lib` is usually found in the LLVM `lib` directory. To keep things
-            // consistent with other platforms, only LLVM `lib` directories are included in the
-            // backup search directory globs so we need to search the LLVM `bin` directory here.
-            if cfg!(target_os = "windows") && $directory.ends_with("lib") {
-                let sibling = $directory.parent().unwrap().join("bin");
-                if let Some(file) = contains(&sibling, files) {
-                    return Ok(file);
-                }
-            }
+impl Nvcc {
+    pub fn new(path: PathBuf) -> Option<Nvcc> {
+        let out = Command::new(&path).arg("-v").arg(".").output();
+        let out = match out {
+            Err(e) => return None,
+            Ok(out) => out,
         };
+
+        let lines = out.stderr
+            .lines()
+            .filter_map(|l| if let Ok(l) = l { Some(l) } else { None })
+            .collect::<Vec<_>>();
+
+        let (includes, libraries) = Nvcc::parse_verbose(&lines);
+
+        Some(Nvcc {
+            path: path,
+            includes: includes,
+            libraries: libraries,
+        })
     }
 
-    // Search the directory provided by the relevant environment variable if it is set.
-    if let Ok(directory) = env::var(env).map(|d| Path::new(&d).to_path_buf()) {
-        search_directory!(directory);
-    }
+    fn parse_verbose(lines: &[String]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let re = Regex::new(r#""-[IL]([.[^"]]*)""#).unwrap();
 
-    // Search the `LD_LIBRARY_PATH` directories.
-    if let Ok(path) = env::var("LD_LIBRARY_PATH") {
-        for directory in path.split(":").map(Path::new) {
-            search_directory!(directory);
+        let inc_lines = lines
+            .iter()
+            .filter(|l| l.starts_with("#$ INCLUDES="))
+            .collect::<Vec<_>>();
+
+        let lib_lines = lines
+            .iter()
+            .filter(|l| l.starts_with("#$ LIBRARIES="))
+            .collect::<Vec<_>>();
+
+        let mut includes = vec![];
+        let mut libraries = vec![];
+
+        for line in inc_lines {
+            // eprintln!("{:?}", line);
+            includes.append(&mut re.captures_iter(line)
+                .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
+                .collect::<Vec<_>>())
         }
-    }
 
-    // Search the backup directories.
-    let search = if cfg!(any(target_os = "freebsd", target_os = "linux")) {
-        SEARCH_LINUX
-    } else if cfg!(target_os = "macos") {
-        SEARCH_OSX
-    } else if cfg!(target_os = "windows") {
-        SEARCH_WINDOWS
-    } else {
-        &[]
-    };
-    for pattern in search {
-        eprintln!("Searching for {}", pattern);
-        let mut options = MatchOptions::new();
-        options.case_sensitive = false;
-        options.require_literal_separator = true;
-        if let Ok(paths) = glob::glob_with(pattern, &options) {
-            for path in paths.filter_map(Result::ok).filter(|p| p.is_dir()) {
-                eprintln!("Looking in {:?}", path);
-                search_directory!(path);
-            }
+        for line in lib_lines {
+            // eprintln!("{:?}", line);
+            libraries.append(&mut re.captures_iter(line)
+                .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
+                .collect::<Vec<_>>())
         }
+
+        (includes, libraries)
     }
 
-    let message =
-        format!(
-        "couldn't find any of [{}], set the {} environment variable to a path where one of these \
-         files can be found",
-        files.iter().map(|f| format!("'{}'", f)).collect::<Vec<_>>().join(", "),
-        env,
-    );
-    Err(message)
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    pub fn includes(&self) -> &Vec<PathBuf> {
+        &self.includes
+    }
+
+    pub fn libraries(&self) -> &Vec<PathBuf> {
+        &self.libraries
+    }
 }
 
 pub struct Build {
@@ -328,76 +332,20 @@ impl Build {
         }
     }
 
-    fn get_nvcc(&self) -> Result<PathBuf, Error> {
-        match find(&["nvcc".to_owned()], "NVCC_PATH") {
-            Ok(path) => return Ok(path),
+    fn get_nvcc(&self) -> Result<Nvcc, Error> {
+        let nvcc_path = Find::new("nvcc")
+            .search_env("NVCC_PATH")
+            .search_globs(SEARCH_LINUX)
+            .execute();
+
+        match Find::new("nvcc")
+            .search_env("NVCC_PATH")
+            .search_globs(SEARCH_LINUX)
+            .execute()
+        {
+            Ok(path) => return Ok(Nvcc::new(path).unwrap()),
             Err(s) => return Err(Error::new(ErrorKind::ToolNotFound, s.as_str())),
         };
-    }
-
-    /// use nvcc -v to get includes
-    fn try_get_nvcc_includes(&self) -> Result<Vec<PathBuf>, Error> {
-        let nvcc = self.get_nvcc()?;
-        let out = Command::new(nvcc).arg("-v").arg(".").output()?;
-        let re = Regex::new(r#""([.[^"]]*)""#).unwrap();
-
-        let include_lines = out.stderr.lines()
-            .filter_map(|l| if let Ok(l) = l { Some(l) } else { None } )
-            .filter(|l| l.starts_with("#$ INCLUDES="))
-            .collect::<Vec<_>>();
-
-        eprintln!("INCLUDES lines from nvcc -v: {:?}", include_lines);
-
-        if include_lines.len() == 0 {
-            return Err(Error::new(
-                ErrorKind::ToolNotFound,
-                "didn't find INCLUDES in nvcc -v output",
-            ));
-        }
-
-        let mut matches = vec![];
-
-        for line in include_lines {
-            // eprintln!("{:?}", line);
-            matches.append(
-                &mut re.captures_iter(line.as_str())
-                    .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
-                    .collect::<Vec<_>>()
-            )
-        }
-        return Ok(matches);
-    }
-
-    /// use nvcc -v to get includes
-    fn try_get_nvcc_libraries(&self) -> Result<Vec<PathBuf>, Error> {
-        let nvcc = self.get_nvcc()?;
-        let out = Command::new(nvcc).arg("-v").arg(".").output()?;
-        let re = Regex::new(r#""-L([.[^"]]*)""#).unwrap();
-
-        let libraries_lines = out.stderr.lines()
-            .filter_map(|l| if let Ok(l) = l { Some(l) } else { None } )
-            .filter(|l| l.starts_with("#$ LIBRARIES="))
-            .collect::<Vec<_>>();
-
-        eprintln!("LIBRARIES lines from nvcc -v: {:?}", libraries_lines);
-
-        if libraries_lines.len() == 0 {
-            return Err(Error::new(
-                ErrorKind::ToolNotFound,
-                "didn't find INCLUDES in nvcc -v output",
-            ));
-        }
-
-        let mut matches = vec![];
-
-        for line in libraries_lines {
-            matches.append(
-                &mut re.captures_iter(line.as_str())
-                    .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
-                    .collect::<Vec<_>>()
-            )
-        }
-        return Ok(matches);
     }
 
     fn get_ar(&self) -> Result<String, Error> {
@@ -424,7 +372,7 @@ impl Build {
     fn try_compile_object(&self, obj: &PathBuf, src: &PathBuf) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
         let nvcc = self.get_nvcc()?;
-        let incs = self.try_get_nvcc_includes()?;
+        let incs = nvcc.includes();
 
         let out = Command::new("nvcc")
             .args(&self.flags)
@@ -459,7 +407,8 @@ impl Build {
 
     fn try_device_link(&self, output: &PathBuf, objects: &Vec<PathBuf>) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
-        let incs = self.try_get_nvcc_includes()?;
+        let nvcc = self.get_nvcc()?;
+        let incs = nvcc.includes();
 
         let out = Command::new("nvcc")
             .args(&self.flags)
@@ -469,7 +418,10 @@ impl Build {
             .arg("-Xcompiler")
             .arg("-fPIC")
             .arg("-Xcompiler")
-            .args(incs.iter().map(|i| String::from("-I") + i.to_str().unwrap()))
+            .args(
+                incs.iter()
+                    .map(|i| String::from("-I") + i.to_str().unwrap()),
+            )
             .arg("-o")
             .arg(output)
             .args(objects)
@@ -527,6 +479,7 @@ impl Build {
         let out_dir = self.get_out_dir()?;
         let host = self.get_host()?;
         let target = self.get_target()?;
+        let nvcc = self.get_nvcc()?;
 
         let out_path = if self.static_flag {
             let mut out_name = String::from("lib");
@@ -573,15 +526,13 @@ impl Build {
                 cuda_lib_path.to_str().unwrap()
             ));
         } else {
-            let paths = self.try_get_nvcc_libraries();
-            match paths {
-                Ok(paths) => for path in paths {
-                    self.print(&format!("cargo:rustc-link-search=native={}", path.to_str().unwrap()));
-                },
-                Err(e) => return Err(e),
+            for path in nvcc.libraries() {
+                self.print(&format!(
+                    "cargo:rustc-link-search=native={}",
+                    path.to_str().unwrap()
+                ));
             }
         };
-
 
         self.print("cargo:rustc-link-lib=cudart");
         self.print("cargo:rustc-link-lib=cudadevrt");
