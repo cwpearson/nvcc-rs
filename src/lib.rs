@@ -185,6 +185,8 @@ impl Nvcc {
         self.path.as_path()
     }
 
+
+
     /// Return only the INCLUDE paths, without link flags
     pub fn include_paths(&self) -> Vec<PathBuf> {
         self.includes
@@ -216,7 +218,7 @@ impl Nvcc {
 
 pub struct Build {
     cargo_metadata: bool,
-    compiler: Option<PathBuf>,
+    compiler: Option<String>,
     files: Vec<PathBuf>,
     host: Option<String>,
     // output: String,
@@ -289,6 +291,11 @@ impl Build {
         self
     }
 
+    pub fn compiler<P: ToString>(&mut self, p: P) -> &mut Build {
+        self.compiler = Some(p.to_string());
+        self
+    }
+
     fn print(&self, s: &str) {
         if self.cargo_metadata {
             println!("{}", s);
@@ -337,20 +344,20 @@ impl Build {
         }
     }
 
-    fn get_compiler(&self) -> Result<PathBuf, Error> {
+    fn get_compiler(&self) -> Result<String, Error> {
         let host = self.get_host()?;
         let target = self.get_target()?;
 
         if let Some(compiler) = self.compiler.clone() {
             return Ok(compiler);
         } else if let Some(compiler) = self.getenv("COMPILER") {
-            return Ok(PathBuf::from(compiler));
+            return Ok(compiler);
         } else if host == target {
-            return Ok(PathBuf::from("g++"));
+            return Ok("g++".to_owned());
         } else {
             match target.as_ref() {
-                "x86_64-unknown-linux-musl" => Ok(PathBuf::from("g++")),
-                "powerpc64le-unknown-linux-gnu" => Ok(PathBuf::from("powerpc64le-linux-gnu-g++")),
+                "x86_64-unknown-linux-musl" => Ok("g++".to_owned()),
+                "powerpc64le-unknown-linux-gnu" => Ok("powerpc64le-linux-gnu-g++".to_owned()),
                 _ => {
                     println!("target was {}", target);
                     Err(Error::new(
