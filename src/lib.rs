@@ -4,7 +4,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nvcc_new() {
+    fn parse_verbose() {
         let lines = r#"
 #$ _SPACE_= 
 #$ _CUDART_=cudart
@@ -23,19 +23,30 @@ mod tests {
 #$ PTXAS_FLAGS=
 "#.split("\n").map(|l| l.to_owned()).collect::<Vec<_>>();
 
-        let nvcc = Nvcc {
+        let mut nvcc = Nvcc {
             path: PathBuf::from("."),
             includes: vec![],
             libraries: vec![],
         };
         let (includes, libraries) = Nvcc::parse_verbose(&lines);
 
+        assert_eq!(includes, vec!["-I/usr/local/cuda/bin/..//include"]);
         assert_eq!(
-            includes,
+            libraries,
+            vec![
+                "-L/usr/local/cuda/bin/..//lib64/stubs",
+                "-L/usr/local/cuda/bin/..//lib64",
+            ]
+        );
+        nvcc.includes = includes;
+        nvcc.libraries = libraries;
+
+        assert_eq!(
+            nvcc.include_paths(),
             vec![PathBuf::from("/usr/local/cuda/bin/..//include")]
         );
         assert_eq!(
-            libraries,
+            nvcc.libraries_paths(),
             vec![
                 PathBuf::from("/usr/local/cuda/bin/..//lib64/stubs"),
                 PathBuf::from("/usr/local/cuda/bin/..//lib64"),
@@ -48,15 +59,15 @@ extern crate find;
 extern crate glob;
 extern crate regex;
 
+use find::Find;
+use glob::MatchOptions;
 use regex::Regex;
 use std::env;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::path::Path;
-use std::vec::Vec;
 use std::string::String;
-use glob::MatchOptions;
-use find::Find;
+use std::vec::Vec;
 
 use std::io::{self, BufRead};
 
@@ -111,9 +122,9 @@ pub struct Nvcc {
     /// where nvcc is
     path: PathBuf,
     /// nvcc's include directories
-    includes: Vec<PathBuf>,
+    includes: Vec<String>,
     /// nvcc's library directories
-    libraries: Vec<PathBuf>,
+    libraries: Vec<String>,
 }
 
 impl Nvcc {
@@ -138,8 +149,8 @@ impl Nvcc {
         })
     }
 
-    fn parse_verbose(lines: &[String]) -> (Vec<PathBuf>, Vec<PathBuf>) {
-        let re = Regex::new(r#""-[IL]([.[^"]]*)""#).unwrap();
+    fn parse_verbose(lines: &[String]) -> (Vec<String>, Vec<String>) {
+        let re = Regex::new(r#""([.[^"]]*)""#).unwrap();
 
         let inc_lines = lines
             .iter()
@@ -157,14 +168,14 @@ impl Nvcc {
         for line in inc_lines {
             // eprintln!("{:?}", line);
             includes.append(&mut re.captures_iter(line)
-                .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
+                .map(|c| c.get(1).unwrap().as_str().to_owned())
                 .collect::<Vec<_>>())
         }
 
         for line in lib_lines {
             // eprintln!("{:?}", line);
             libraries.append(&mut re.captures_iter(line)
-                .map(|c| PathBuf::from(c.get(1).unwrap().as_str()))
+                .map(|c| c.get(1).unwrap().as_str().to_owned())
                 .collect::<Vec<_>>())
         }
 
@@ -175,11 +186,31 @@ impl Nvcc {
         self.path.as_path()
     }
 
-    pub fn includes(&self) -> &Vec<PathBuf> {
+    /// Return only the INCLUDE paths, without link flags
+    pub fn include_paths(&self) -> Vec<PathBuf> {
+        self.includes
+            .iter()
+            .map(|s| s.trim_left_matches("-I"))
+            .map(|s| PathBuf::from(s))
+            .collect::<Vec<_>>()
+    }
+
+    /// Return only the LIBRARIES paths, without link flags
+    pub fn libraries_paths(&self) -> Vec<PathBuf> {
+        self.libraries
+            .iter()
+            .map(|s| s.trim_left_matches("-L"))
+            .map(|s| PathBuf::from(s))
+            .collect::<Vec<_>>()
+    }
+
+    /// INCLUDE flags from nvcc
+    pub fn include_flags(&self) -> &Vec<String> {
         &self.includes
     }
 
-    pub fn libraries(&self) -> &Vec<PathBuf> {
+    /// LIBRARIES flags from nvcc
+    pub fn libraries_flags(&self) -> &Vec<String> {
         &self.libraries
     }
 }
@@ -372,7 +403,9 @@ impl Build {
     fn try_compile_object(&self, obj: &PathBuf, src: &PathBuf) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
         let nvcc = self.get_nvcc()?;
-        let incs = nvcc.includes();
+        let incs = nvcc.include_flags();
+
+        eprintln!("includes: {:?}", incs);
 
         let out = Command::new("nvcc")
             .args(&self.flags)
@@ -408,7 +441,7 @@ impl Build {
     fn try_device_link(&self, output: &PathBuf, objects: &Vec<PathBuf>) -> Result<(), Error> {
         let compiler = self.get_compiler()?;
         let nvcc = self.get_nvcc()?;
-        let incs = nvcc.includes();
+        let incs = nvcc.include_flags();
 
         let out = Command::new("nvcc")
             .args(&self.flags)
@@ -418,10 +451,7 @@ impl Build {
             .arg("-Xcompiler")
             .arg("-fPIC")
             .arg("-Xcompiler")
-            .args(
-                incs.iter()
-                    .map(|i| String::from("-I") + i.to_str().unwrap()),
-            )
+            .args(incs)
             .arg("-o")
             .arg(output)
             .args(objects)
@@ -526,11 +556,8 @@ impl Build {
                 cuda_lib_path.to_str().unwrap()
             ));
         } else {
-            for path in nvcc.libraries() {
-                self.print(&format!(
-                    "cargo:rustc-link-search=native={}",
-                    path.to_str().unwrap()
-                ));
+            for path in nvcc.libraries_paths() {
+                self.print(&format!("cargo:rustc-link-search=native={}", path.to_str().unwrap()));
             }
         };
 
