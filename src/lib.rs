@@ -60,7 +60,6 @@ extern crate glob;
 extern crate regex;
 
 use find::Find;
-use glob::MatchOptions;
 use regex::Regex;
 use std::env;
 use std::path::Path;
