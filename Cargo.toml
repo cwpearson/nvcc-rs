@@ -1,6 +1,6 @@
 [package]
 name = "nvcc"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Carl Pearson <pearson@illinois.edu>"]
 
 [dependencies]
